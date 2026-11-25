@@ -255,6 +255,8 @@ button:active {
   max-height: 100%;
   touch-action: none;
   cursor: default;
+  image-rendering: crisp-edges;
+  image-rendering: pixelated;
 }
 
 /* Optional Toggleable CRT Scanline + Vignette Filter */

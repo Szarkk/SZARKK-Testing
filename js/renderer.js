@@ -227,8 +227,93 @@ function drawMeasurementGridOverlay(ctx, game) {
   ctx.restore();
 }
 
+/* -------------------------------------------------------------------------
+   WHOLE-GAME PIXEL RENDER
+   The scene is drawn into a low-res offscreen canvas (LOGICAL / PIXEL_SCALE),
+   then blown up to the visible canvas in one nearest-neighbour drawImage, so
+   every entity shares one pixel grid. Game logic stays in 480x640 units.
+   Canvas text is deferred and drawn at full resolution on top for legibility.
+   ------------------------------------------------------------------------- */
+const PIXEL_SCALE = 2;
+const PIXEL_W = Math.round(LOGICAL_W / PIXEL_SCALE); // 240
+const PIXEL_H = Math.round(LOGICAL_H / PIXEL_SCALE); // 320
+
+function getPixelLayer(game) {
+  if (game.pixelLayer) return game.pixelLayer;
+  const canvas = document.createElement('canvas');
+  canvas.width = PIXEL_W;
+  canvas.height = PIXEL_H;
+  const ctx = canvas.getContext('2d');
+  const proto = CanvasRenderingContext2D.prototype;
+  const blurDesc = Object.getOwnPropertyDescriptor(proto, 'shadowBlur');
+  const textQueue = [];
+
+  // shadowBlur ignores the transform, so halve it to keep glows the same
+  // logical size as before (otherwise they double and smear at low res).
+  Object.defineProperty(ctx, 'shadowBlur', {
+    configurable: true,
+    get() { return blurDesc.get.call(this) * PIXEL_SCALE; },
+    set(v) { blurDesc.set.call(this, v / PIXEL_SCALE); }
+  });
+
+  // Defer text: record state now, draw crisp on the full-res canvas later.
+  ctx.fillText = function (text, x, y, maxWidth) {
+    textQueue.push({
+      text, x, y, maxWidth,
+      m: this.getTransform(),
+      font: this.font,
+      fillStyle: this.fillStyle,
+      textAlign: this.textAlign,
+      textBaseline: this.textBaseline,
+      globalAlpha: this.globalAlpha,
+      composite: this.globalCompositeOperation,
+      shadowColor: this.shadowColor,
+      shadowBlur: this.shadowBlur
+    });
+  };
+
+  game.pixelLayer = { canvas, ctx, textQueue };
+  return game.pixelLayer;
+}
+
+function drawDeferredText(ctx, queue, sx, sy) {
+  if (!queue.length) return;
+  ctx.save();
+  for (const t of queue) {
+    const m = t.m;
+    ctx.setTransform(m.a * sx, m.b * sy, m.c * sx, m.d * sy, m.e * sx, m.f * sy);
+    ctx.font = t.font;
+    ctx.fillStyle = t.fillStyle;
+    ctx.textAlign = t.textAlign;
+    ctx.textBaseline = t.textBaseline;
+    ctx.globalAlpha = t.globalAlpha;
+    ctx.globalCompositeOperation = t.composite;
+    ctx.shadowColor = t.shadowColor;
+    ctx.shadowBlur = t.shadowBlur;
+    if (t.maxWidth !== undefined) ctx.fillText(t.text, t.x, t.y, t.maxWidth);
+    else ctx.fillText(t.text, t.x, t.y);
+  }
+  ctx.restore();
+}
+
 export function renderFrame(game) {
-  const ctx = game.ctx;
+  const layer = getPixelLayer(game);
+  layer.textQueue.length = 0;
+  layer.ctx.setTransform(1 / PIXEL_SCALE, 0, 0, 1 / PIXEL_SCALE, 0, 0);
+  drawScene(game, layer.ctx);
+
+  const out = game.ctx;
+  const w = game.canvas.width;
+  const h = game.canvas.height;
+  out.save();
+  out.setTransform(1, 0, 0, 1, 0, 0);
+  out.imageSmoothingEnabled = false;
+  out.drawImage(layer.canvas, 0, 0, w, h);
+  drawDeferredText(out, layer.textQueue, w / PIXEL_W, h / PIXEL_H);
+  out.restore();
+}
+
+function drawScene(game, ctx) {
   ctx.save();
 
   if (game.shake > 0) {
