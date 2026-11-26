@@ -166,13 +166,13 @@ export const COLORS = {
 };
 
 export const STORAGE_KEYS = {
-  hi: 'szarkk_test_hi',
-  hiHard: 'szarkk_test_hi_hard',
-  auto: 'szarkk_test_auto',
-  crt: 'szarkk_test_crt',
-  sfx: 'szarkk_test_sfx',
-  leaderboard: 'szarkk_test_leaderboard',
-  callsign: 'szarkk_test_callsign'
+  hi: 'szarkk_hi',
+  hiHard: 'szarkk_hi_hard',
+  auto: 'szarkk_auto',
+  crt: 'szarkk_crt',
+  sfx: 'szarkk_sfx',
+  leaderboard: 'szarkk_leaderboard',
+  callsign: 'szarkk_callsign'
 };
 
 export const ARCHIVE_ENTRIES = [

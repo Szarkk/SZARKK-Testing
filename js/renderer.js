@@ -229,31 +229,64 @@ function drawMeasurementGridOverlay(ctx, game) {
 
 /* -------------------------------------------------------------------------
    WHOLE-GAME PIXEL RENDER
-   The scene is drawn into a low-res offscreen canvas (LOGICAL / PIXEL_SCALE),
-   then blown up to the visible canvas in one nearest-neighbour drawImage, so
-   every entity shares one pixel grid. Game logic stays in 480x640 units.
+   The scene is drawn with hard flat-colour shapes (no shadowBlur, every line
+   at least one art pixel wide), reduced to a low-res art buffer
+   (LOGICAL / PIXEL_SCALE), given a cheap pixel-style glow, then blown up to
+   the visible canvas in one nearest-neighbour drawImage, so every entity
+   shares one pixel grid. Game logic stays in 480x640 units.
    Canvas text is deferred and drawn at full resolution on top for legibility.
    ------------------------------------------------------------------------- */
-const PIXEL_SCALE = 2;
-const PIXEL_W = Math.round(LOGICAL_W / PIXEL_SCALE); // 240
-const PIXEL_H = Math.round(LOGICAL_H / PIXEL_SCALE); // 320
+const QS = typeof location !== 'undefined' ? new URLSearchParams(location.search) : null;
+const PIXEL_SCALE = Math.max(1, parseInt((QS && QS.get('px')) || '3', 10) || 3);
+const PIXEL_MODE = (QS && QS.get('pm')) || 'sample'; // sample | direct
+const PIXEL_GLOW = parseFloat((QS && QS.get('glow')) || '0.4');
+const PIXEL_W = Math.round(LOGICAL_W / PIXEL_SCALE); // 160 at 3x
+const PIXEL_H = Math.round(LOGICAL_H / PIXEL_SCALE); // 213 at 3x
+
+function makeCanvas(w, h) {
+  const c = document.createElement('canvas');
+  c.width = w;
+  c.height = h;
+  const ctx = c.getContext('2d');
+  ctx.imageSmoothingEnabled = false;
+  return { canvas: c, ctx };
+}
 
 function getPixelLayer(game) {
   if (game.pixelLayer) return game.pixelLayer;
-  const canvas = document.createElement('canvas');
-  canvas.width = PIXEL_W;
-  canvas.height = PIXEL_H;
-  const ctx = canvas.getContext('2d');
+  const direct = PIXEL_MODE === 'direct';
+  // "sample": draw at logical 480x640, then point-sample down (hard aliased
+  // edges, like real pixel art). "direct": draw straight into the art buffer.
+  const art = makeCanvas(PIXEL_W, PIXEL_H);
+  const scene = direct ? art : makeCanvas(LOGICAL_W, LOGICAL_H);
+  const glow = makeCanvas(Math.max(1, PIXEL_W >> 1), Math.max(1, PIXEL_H >> 1));
+  glow.ctx.imageSmoothingEnabled = true;
+  const ctx = scene.ctx;
   const proto = CanvasRenderingContext2D.prototype;
   const blurDesc = Object.getOwnPropertyDescriptor(proto, 'shadowBlur');
+  const lwDesc = Object.getOwnPropertyDescriptor(proto, 'lineWidth');
   const textQueue = [];
+  const blurStack = [];
+  let intendedBlur = 0;
 
-  // shadowBlur ignores the transform, so halve it to keep glows the same
-  // logical size as before (otherwise they double and smear at low res).
+  // No soft shadows on the art layer: glow comes from the pixel glow pass.
+  // The intended value is tracked (with save/restore) only for deferred text.
+  blurDesc.set.call(ctx, 0);
   Object.defineProperty(ctx, 'shadowBlur', {
     configurable: true,
-    get() { return blurDesc.get.call(this) * PIXEL_SCALE; },
-    set(v) { blurDesc.set.call(this, v / PIXEL_SCALE); }
+    get() { return intendedBlur; },
+    set(v) { intendedBlur = +v || 0; }
+  });
+  const rawSave = ctx.save.bind(ctx);
+  const rawRestore = ctx.restore.bind(ctx);
+  ctx.save = () => { blurStack.push(intendedBlur); rawSave(); };
+  ctx.restore = () => { if (blurStack.length) intendedBlur = blurStack.pop(); rawRestore(); };
+
+  // Every stroke is at least one whole art pixel wide.
+  Object.defineProperty(ctx, 'lineWidth', {
+    configurable: true,
+    get() { return lwDesc.get.call(this); },
+    set(v) { lwDesc.set.call(this, Math.max(+v || 0, PIXEL_SCALE)); }
   });
 
   // Defer text: record state now, draw crisp on the full-res canvas later.
@@ -268,11 +301,11 @@ function getPixelLayer(game) {
       globalAlpha: this.globalAlpha,
       composite: this.globalCompositeOperation,
       shadowColor: this.shadowColor,
-      shadowBlur: this.shadowBlur
+      shadowBlur: intendedBlur
     });
   };
 
-  game.pixelLayer = { canvas, ctx, textQueue };
+  game.pixelLayer = { art, scene, glow, ctx, textQueue, direct };
   return game.pixelLayer;
 }
 
@@ -298,9 +331,34 @@ function drawDeferredText(ctx, queue, sx, sy) {
 
 export function renderFrame(game) {
   const layer = getPixelLayer(game);
+  const { art, scene, glow } = layer;
   layer.textQueue.length = 0;
-  layer.ctx.setTransform(1 / PIXEL_SCALE, 0, 0, 1 / PIXEL_SCALE, 0, 0);
+  const k = scene.canvas.width / LOGICAL_W;
+  layer.ctx.setTransform(k, 0, 0, scene.canvas.height / LOGICAL_H, 0, 0);
   drawScene(game, layer.ctx);
+
+  const a = art.ctx;
+  a.setTransform(1, 0, 0, 1, 0, 0);
+  a.globalAlpha = 1;
+  a.globalCompositeOperation = 'source-over';
+  if (!layer.direct) {
+    a.imageSmoothingEnabled = false; // point-sample: hard stair-stepped pixels
+    a.drawImage(scene.canvas, 0, 0, PIXEL_W, PIXEL_H);
+  }
+
+  // Cheap pixel-style neon glow: a soft half-res copy added on top at low
+  // alpha. It lands on the art grid, so the final upscale keeps it blocky.
+  if (PIXEL_GLOW > 0) {
+    const g = glow.ctx;
+    g.clearRect(0, 0, glow.canvas.width, glow.canvas.height);
+    g.drawImage(art.canvas, 0, 0, glow.canvas.width, glow.canvas.height);
+    a.save();
+    a.imageSmoothingEnabled = true;
+    a.globalCompositeOperation = 'lighter';
+    a.globalAlpha = PIXEL_GLOW;
+    a.drawImage(glow.canvas, 0, 0, PIXEL_W, PIXEL_H);
+    a.restore();
+  }
 
   const out = game.ctx;
   const w = game.canvas.width;
@@ -308,8 +366,8 @@ export function renderFrame(game) {
   out.save();
   out.setTransform(1, 0, 0, 1, 0, 0);
   out.imageSmoothingEnabled = false;
-  out.drawImage(layer.canvas, 0, 0, w, h);
-  drawDeferredText(out, layer.textQueue, w / PIXEL_W, h / PIXEL_H);
+  out.drawImage(art.canvas, 0, 0, w, h);
+  drawDeferredText(out, layer.textQueue, w / scene.canvas.width, h / scene.canvas.height);
   out.restore();
 }
 
